@@ -1,27 +1,30 @@
-<!DOCTYPE html>
-<html>
+<!doctype html>
+<html lang="de">
 <head>
-    <meta charset="UTF-8">
-    <title>AR Test</title>
-
-    <script type="module"
-        src="https://unpkg.com/@google/model-viewer/dist    <style>
-        body {
-            margin: 0;
-            height: 100vh;
-        }
-
-        model-viewer {
-            width: 100%;
-            height: 100%;
-        }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Meine AR-Demo</title>
+  <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/4.0.0/model-viewer.min.js"></script>
+  <style>
+    body { margin:0; font-family:Arial,sans-serif; background:#f2f2f2; }
+    model-viewer { width:100vw; height:100vh; background:#eeeeee; }
+    .ar-button {
+      background:#0067b1; color:white; border:none; border-radius:8px;
+      padding:14px 20px; font-size:16px; font-weight:bold;
+      position:absolute; left:50%; bottom:30px; transform:translateX(-50%);
+    }
+  </style>
 </head>
-
 <body>
-
-<model-viewer
+  <model-viewer
     src="fee.glb"
+    alt="AR-Testmodell"
     ar
     ar-modes="webxr scene-viewer quick-look"
-    auto
+    camera-controls
+    auto-rotate
+    shadow-intensity="1">
+    <button class="ar-button" slot="ar-button">Im eigenen Raum anzeigen</button>
+  </model-viewer>
+</body>
+</html>
