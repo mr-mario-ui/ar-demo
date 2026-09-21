@@ -28,7 +28,12 @@
       z-index:10; box-shadow:0 2px 8px rgba(0,0,0,.25);
     }
     /* Overlay waehrend der AR-Sitzung */
-    #overlay { display:none; position:fixed; inset:0; pointer-events:none; }
+    #overlay { display:none; position:fixed; inset:0; pointer-events:auto; touch-action:none; }
+    #spin {
+      position:absolute; left:16px; bottom:30px; pointer-events:auto;
+      background:rgba(0,0,0,.6); color:#fff; border:none; border-radius:8px;
+      padding:12px 16px; font-size:15px;
+    }
     #hint {
       position:absolute; left:50%; top:24px; transform:translateX(-50%);
       background:rgba(0,0,0,.6); color:#fff; padding:10px 16px; border-radius:20px;
@@ -58,6 +63,7 @@
 
   <div id="overlay">
     <div id="hint">Handy langsam über den Boden oder Tisch bewegen …</div>
+    <button id="spin">Drehen: an</button>
     <button id="exit">AR beenden</button>
   </div>
 
@@ -70,6 +76,8 @@
     const TARGET_HEIGHT  = 0.25;   // Groesse der Figur in Metern (0.25 = 25 cm)
     const DOUBLE_TAP_MS  = 400;    // max. Abstand zwischen zwei Tipps
     const FLOAT_HEIGHT   = 0.02;   // Fee schwebt 2 cm ueber der Flaeche
+    const SPIN_SPEED     = 0.5;    // automatische Drehung in rad/s (0.5 = eine Umdrehung in ca. 12 s)
+    const SWIPE_FACTOR   = 0.012;  // wie stark ein Wischen die Fee dreht
     // -----------------------------------
 
     const viewer  = document.getElementById('viewer');
@@ -77,6 +85,8 @@
     const overlay = document.getElementById('overlay');
     const hint    = document.getElementById('hint');
     const exitBtn = document.getElementById('exit');
+    const spinBtn = document.getElementById('spin');
+    let autoSpin = true, dragging = false, lastX = 0, lastTime = 0;
 
     // Welcher AR-Weg ist verfuegbar?
     async function webxrAvailable() {
@@ -186,6 +196,25 @@
     exitBtn.addEventListener('beforexrselect', (e) => e.preventDefault());
     exitBtn.addEventListener('click', () => session && session.end());
 
+    // Drehen an/aus
+    spinBtn.addEventListener('beforexrselect', (e) => e.preventDefault());
+    spinBtn.addEventListener('click', () => {
+      autoSpin = !autoSpin;
+      spinBtn.textContent = autoSpin ? 'Drehen: an' : 'Drehen: aus';
+    });
+
+    // Mit einem Finger wischen = Fee drehen (Groesse bleibt fest)
+    overlay.addEventListener('touchstart', (e) => {
+      if (e.touches.length === 1) { dragging = true; lastX = e.touches[0].clientX; }
+    }, { passive: true });
+    overlay.addEventListener('touchmove', (e) => {
+      if (!dragging || e.touches.length !== 1 || !fairy || !fairy.visible) return;
+      const x = e.touches[0].clientX;
+      fairy.rotation.y += (x - lastX) * SWIPE_FACTOR;
+      lastX = x;
+    }, { passive: true });
+    overlay.addEventListener('touchend', () => { dragging = false; });
+
     async function onTap() {
       const now = performance.now();
       const isDouble = now - lastTap < DOUBLE_TAP_MS;
@@ -222,8 +251,11 @@
         }
       }
       // sanftes Schweben
+      const dt = lastTime ? Math.min((time - lastTime) / 1000, 0.1) : 0;
+      lastTime = time;
       if (fairy && fairy.visible) {
         const t = time / 1000;
+        if (autoSpin && !dragging) fairy.rotation.y += dt * SPIN_SPEED;
         const m = fairy.children[0];
         if (m.userData.baseY === undefined) m.userData.baseY = m.position.y;
         m.position.y = m.userData.baseY + Math.sin(t * 2.0) * 0.004;
