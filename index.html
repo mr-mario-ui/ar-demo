@@ -4,27 +4,233 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Meine AR-Demo</title>
+
+  <!-- model-viewer: Vorschau im Browser + iPhone (Quick Look) + Android-Fallback -->
   <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/4.0.0/model-viewer.min.js"></script>
+
+  <!-- three.js fuer den eigenen AR-Modus mit Doppeltipp (Android / Chrome) -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+
   <style>
-    body { margin:0; font-family:Arial,sans-serif; background:#f2f2f2; }
+    html, body { margin:0; height:100%; font-family:Arial, sans-serif; background:#f2f2f2; }
     model-viewer { width:100vw; height:100vh; background:#eeeeee; }
     .ar-button {
       background:#0067b1; color:white; border:none; border-radius:8px;
       padding:14px 20px; font-size:16px; font-weight:bold;
-      position:absolute; left:50%; bottom:30px; transform:translateX(-50%);
+      position:fixed; left:50%; bottom:30px; transform:translateX(-50%);
+      z-index:10; box-shadow:0 2px 8px rgba(0,0,0,.25);
+    }
+    /* Overlay waehrend der AR-Sitzung */
+    #overlay { display:none; position:fixed; inset:0; pointer-events:none; }
+    #hint {
+      position:absolute; left:50%; top:24px; transform:translateX(-50%);
+      background:rgba(0,0,0,.6); color:#fff; padding:10px 16px; border-radius:20px;
+      font-size:15px; text-align:center; max-width:85vw;
+    }
+    #exit {
+      position:absolute; right:16px; bottom:30px; pointer-events:auto;
+      background:rgba(0,0,0,.6); color:#fff; border:none; border-radius:8px;
+      padding:12px 16px; font-size:15px;
     }
   </style>
 </head>
 <body>
-  <model-viewer
+
+  <model-viewer id="viewer"
     src="fee.glb"
-    alt="AR-Testmodell"
+    alt="Fee Liora"
     ar
-    ar-modes="webxr scene-viewer quick-look"
+    ar-modes="quick-look scene-viewer"
+    ar-scale="fixed"
     camera-controls
     auto-rotate
     shadow-intensity="1">
-    <button class="ar-button" slot="ar-button">Im eigenen Raum anzeigen</button>
   </model-viewer>
+
+  <button id="arButton" class="ar-button">Im eigenen Raum anzeigen</button>
+
+  <div id="overlay">
+    <div id="hint">Handy langsam über den Boden oder Tisch bewegen …</div>
+    <button id="exit">AR beenden</button>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+    // ---------- Einstellungen ----------
+    const MODEL_URL      = 'fee.glb';
+    const TARGET_HEIGHT  = 0.25;   // Groesse der Figur in Metern (0.25 = 25 cm)
+    const DOUBLE_TAP_MS  = 400;    // max. Abstand zwischen zwei Tipps
+    const FLOAT_HEIGHT   = 0.02;   // Fee schwebt 2 cm ueber der Flaeche
+    // -----------------------------------
+
+    const viewer  = document.getElementById('viewer');
+    const arBtn   = document.getElementById('arButton');
+    const overlay = document.getElementById('overlay');
+    const hint    = document.getElementById('hint');
+    const exitBtn = document.getElementById('exit');
+
+    // Welcher AR-Weg ist verfuegbar?
+    async function webxrAvailable() {
+      try { return !!(navigator.xr && await navigator.xr.isSessionSupported('immersive-ar')); }
+      catch { return false; }
+    }
+
+    arBtn.addEventListener('click', async () => {
+      if (await webxrAvailable()) {
+        startWebXR();                 // Android/Chrome: eigener Modus mit Doppeltipp
+      } else if (viewer.canActivateAR) {
+        viewer.activateAR();          // iPhone: Quick Look (Platzierung durch iOS)
+      } else {
+        alert('AR wird auf diesem Gerät leider nicht unterstützt.');
+      }
+    });
+
+    // ---------- Eigener WebXR-Modus ----------
+    let renderer, scene, camera, reticle, fairy, shadow, hitTestSource = null, session = null;
+    let lastTap = 0, placed = false, fairyReady;
+
+    function makeShadowTexture() {
+      const c = document.createElement('canvas'); c.width = c.height = 128;
+      const g = c.getContext('2d');
+      const grd = g.createRadialGradient(64,64,0,64,64,64);
+      grd.addColorStop(0,'rgba(0,0,0,0.45)'); grd.addColorStop(1,'rgba(0,0,0,0)');
+      g.fillStyle = grd; g.fillRect(0,0,128,128);
+      return new THREE.CanvasTexture(c);
+    }
+
+    function initThree() {
+      renderer = new THREE.WebGLRenderer({ antialias:true, alpha:true });
+      renderer.setPixelRatio(window.devicePixelRatio);
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.xr.enabled = true;
+      document.body.appendChild(renderer.domElement);
+
+      scene  = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.01, 20);
+
+      scene.add(new THREE.HemisphereLight(0xffffff, 0x8888aa, 1.3));
+      const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+      sun.position.set(0.5, 1, 0.5); scene.add(sun);
+
+      // Zielring auf erkannten Flaechen
+      reticle = new THREE.Mesh(
+        new THREE.RingGeometry(0.05, 0.065, 40).rotateX(-Math.PI/2),
+        new THREE.MeshBasicMaterial({ color:0xffffff, transparent:true, opacity:0.9 })
+      );
+      reticle.matrixAutoUpdate = false; reticle.visible = false; scene.add(reticle);
+
+      // Figur laden und exakt auf TARGET_HEIGHT skalieren, Fuesse auf 0
+      fairyReady = new Promise((resolve) => {
+        new GLTFLoader().load(MODEL_URL, (gltf) => {
+          const model = gltf.scene;
+          const box = new THREE.Box3().setFromObject(model);
+          const size = box.getSize(new THREE.Vector3());
+          const s = TARGET_HEIGHT / size.y;
+          model.scale.setScalar(s);
+          const box2 = new THREE.Box3().setFromObject(model);
+          const c = box2.getCenter(new THREE.Vector3());
+          model.position.set(-c.x, -box2.min.y + FLOAT_HEIGHT, -c.z);
+
+          fairy = new THREE.Group(); fairy.add(model); fairy.visible = false;
+          shadow = new THREE.Mesh(
+            new THREE.PlaneGeometry(0.16, 0.16).rotateX(-Math.PI/2),
+            new THREE.MeshBasicMaterial({ map:makeShadowTexture(), transparent:true, depthWrite:false })
+          );
+          fairy.add(shadow);
+          scene.add(fairy);
+          resolve();
+        });
+      });
+
+      window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth/window.innerHeight; camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    }
+
+    async function startWebXR() {
+      if (!renderer) initThree();
+      renderer.domElement.style.display = 'block';
+      session = await navigator.xr.requestSession('immersive-ar', {
+        requiredFeatures: ['hit-test'],
+        optionalFeatures: ['dom-overlay'],
+        domOverlay: { root: overlay }
+      });
+      renderer.xr.setReferenceSpaceType('local');
+      await renderer.xr.setSession(session);
+
+      overlay.style.display = 'block'; arBtn.style.display = 'none';
+      hint.textContent = 'Handy langsam über den Boden oder Tisch bewegen …';
+      placed = false;
+      if (fairy) fairy.visible = false;
+
+      const viewerSpace = await session.requestReferenceSpace('viewer');
+      hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+
+      // Doppeltipp erkennen
+      session.addEventListener('select', onTap);
+      session.addEventListener('end', onEnd);
+      renderer.setAnimationLoop(render);
+    }
+
+    // Tipps auf den Beenden-Knopf nicht als Platzierung zaehlen
+    exitBtn.addEventListener('beforexrselect', (e) => e.preventDefault());
+    exitBtn.addEventListener('click', () => session && session.end());
+
+    async function onTap() {
+      const now = performance.now();
+      const isDouble = now - lastTap < DOUBLE_TAP_MS;
+      lastTap = isDouble ? 0 : now;
+      if (!isDouble || !reticle.visible) return;
+
+      await fairyReady;
+      fairy.position.setFromMatrixPosition(reticle.matrix);
+      // Fee dreht sich zum Betrachter
+      const camPos = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
+      fairy.rotation.set(0, Math.atan2(camPos.x - fairy.position.x, camPos.z - fairy.position.z), 0);
+      fairy.visible = true; placed = true;
+      hint.textContent = 'Doppeltippen, um die Fee neu zu platzieren';
+    }
+
+    function onEnd() {
+      hitTestSource = null; session = null;
+      renderer.setAnimationLoop(null);
+      overlay.style.display = 'none'; arBtn.style.display = 'block';
+      renderer.domElement.style.display = 'none';   // Vorschau wieder bedienbar
+      reticle.visible = false; if (fairy) fairy.visible = false;
+    }
+
+    function render(time, frame) {
+      if (frame && hitTestSource) {
+        const refSpace = renderer.xr.getReferenceSpace();
+        const hits = frame.getHitTestResults(hitTestSource);
+        if (hits.length) {
+          reticle.visible = true;
+          reticle.matrix.fromArray(hits[0].getPose(refSpace).transform.matrix);
+          if (!placed) hint.textContent = 'Zweimal schnell tippen, um die Fee hier zu platzieren';
+        } else {
+          reticle.visible = false;
+        }
+      }
+      // sanftes Schweben
+      if (fairy && fairy.visible) {
+        const t = time / 1000;
+        const m = fairy.children[0];
+        if (m.userData.baseY === undefined) m.userData.baseY = m.position.y;
+        m.position.y = m.userData.baseY + Math.sin(t * 2.0) * 0.004;
+        fairy.children[0].rotation.z = Math.sin(t * 1.3) * 0.02;
+      }
+      renderer.render(scene, camera);
+    }
+  </script>
 </body>
 </html>
